@@ -7,6 +7,7 @@ Usage: python3 visualizer.py input.m4a -o output.mp4
 import argparse
 import colorsys
 import os
+import random
 import subprocess
 import sys
 from multiprocessing import Pool, cpu_count
@@ -273,8 +274,9 @@ def make_bar_colors(n_bars, base_color_hex=None):
         h_start = (h - 45 / 360) % 1.0
         h_end   = (h + 45 / 360) % 1.0
     else:
-        h_start = 240 / 360   # blue
-        h_end   = 330 / 360   # pink
+        h_base  = random.random()
+        h_start = (h_base - 45 / 360) % 1.0
+        h_end   = (h_base + 45 / 360) % 1.0
 
     colors = np.empty((n_bars, 3), dtype=np.uint8)
     for i in range(n_bars):
