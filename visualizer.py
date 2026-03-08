@@ -34,6 +34,7 @@ _n_bars = None
 _duration = None
 _fps = None
 _filename = None
+_bg_color_f = None    # np.float32 (3,) — background color for vectorized blending
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +43,7 @@ _filename = None
 def _worker_init(shm_name, shm_shape, shm_dtype,
                  bar_colors, bg_color, W, H,
                  n_frames, n_bars, duration, fps, filename):
-    global _shm, _spectrum, _bar_colors, _bg_color, _font, _font_small
+    global _shm, _spectrum, _bar_colors, _bg_color, _bg_color_f, _font, _font_small
     global _W, _H, _n_frames, _n_bars, _duration, _fps, _filename
 
     _shm = SharedMemory(name=shm_name)
@@ -50,6 +51,7 @@ def _worker_init(shm_name, shm_shape, shm_dtype,
 
     _bar_colors = bar_colors
     _bg_color = bg_color
+    _bg_color_f = np.array(bg_color, dtype=np.float32)
     _W = W
     _H = H
     _n_frames = n_frames
@@ -164,9 +166,8 @@ def render_frame(frame_idx):
     WAVE_SPEED = 0.12   # 시간 방향 속도 (rad/frame)
     SLICE      = 2      # 반사 슬라이스 두께 (px)
 
-    # 반사 레이어 (블러 적용을 위해 별도 이미지)
-    refl_img = Image.new('RGB', (W, H), (0, 0, 0))
-    refl_draw = ImageDraw.Draw(refl_img)
+    # 반사 레이어 — NumPy 배열에 직접 쓰기 (PIL rectangle 호출 제거)
+    refl_arr = np.zeros((H, W, 3), dtype=np.uint8)
 
     draw = ImageDraw.Draw(img)
     for i in range(_n_bars):
@@ -192,23 +193,34 @@ def render_frame(frame_idx):
             draw.rectangle([rx0, y_top, rx1, center_y], fill=color)
             draw.rectangle([lx0, y_top, lx1, center_y], fill=color)
 
-        # 아래쪽 막대 — 물 반사 효과 (페이드아웃 + 물결 왜곡) → 반사 레이어에 그림
-        for y in range(center_y, y_bot, SLICE):
-            depth = (y - center_y) / max(1, down_h)
-            fade = (1.0 - depth) ** 1.5
-            blended = tuple(
-                int(bar_c * fade + bg_c * (1.0 - fade))
-                for bar_c, bg_c in zip(color, _bg_color)
-            )
-            y1 = min(y + SLICE - 1, y_bot)
-            wave_dx = int(WAVE_AMP * math.sin(y * WAVE_FREQ + frame_idx * WAVE_SPEED))
+        # 아래쪽 막대 — 물 반사 효과 (벡터화)
+        color_f = _bar_colors[i].astype(np.float32)
+        ys = np.arange(center_y, y_bot, SLICE)              # (n,)
+        depths = (ys - center_y) / max(1, down_h)           # (n,)
+        fades = (1.0 - depths) ** 1.5                       # (n,)
+        wave_dxs = (WAVE_AMP * np.sin(
+            ys * WAVE_FREQ + frame_idx * WAVE_SPEED
+        )).astype(np.int32)                                  # (n,)
+        blended = np.clip(
+            fades[:, None] * color_f + (1.0 - fades[:, None]) * _bg_color_f,
+            0, 255
+        ).astype(np.uint8)                                   # (n, 3)
+
+        for j in range(len(ys)):
+            y = int(ys[j])
+            y_end = min(y + SLICE, y_bot)
+            dx = int(wave_dxs[j])
             if i == 0:
-                refl_draw.rectangle([cx0 + wave_dx, y, cx1 + wave_dx, y1], fill=blended)
+                x0c = max(0, cx0 + dx); x1c = min(W, cx1 + dx + 1)
+                refl_arr[y:y_end, x0c:x1c] = blended[j]
             else:
-                refl_draw.rectangle([rx0 + wave_dx, y, rx1 + wave_dx, y1], fill=blended)
-                refl_draw.rectangle([lx0 - wave_dx, y, lx1 - wave_dx, y1], fill=blended)
+                x0r = max(0, rx0 + dx); x1r = min(W, rx1 + dx + 1)
+                x0l = max(0, lx0 - dx); x1l = min(W, lx1 - dx + 1)
+                refl_arr[y:y_end, x0r:x1r] = blended[j]
+                refl_arr[y:y_end, x0l:x1l] = blended[j]
 
     # 반사 레이어 블러 후 합성 (검은 배경이므로 add로 자연스럽게 합성)
+    refl_img = Image.fromarray(refl_arr, 'RGB')
     refl_img = refl_img.filter(ImageFilter.GaussianBlur(radius=2))
     img = ImageChops.add(img, refl_img)
 
@@ -376,7 +388,7 @@ def build_video_fast(spectrum, audio_file, output_file, fps, duration,
         if n_workers > 1:
             with Pool(n_workers, initializer=_worker_init, initargs=init_args) as pool:
                 for i, frame_bytes in enumerate(
-                        pool.imap(render_frame, range(n_frames), chunksize=4)):
+                        pool.imap(render_frame, range(n_frames), chunksize=16)):
                     proc.stdin.write(frame_bytes)
                     if i % (fps * 5) == 0:
                         pct = i / n_frames * 100
