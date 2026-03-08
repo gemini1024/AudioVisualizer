@@ -1,5 +1,7 @@
 # AudioVisualizer
 
+![snapshot](docs/snapshot.png)
+
 오디오 파일을 FFT 스펙트럼 시각화 MP4 영상으로 변환하는 CLI 도구.
 
 ## 특징
