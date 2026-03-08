@@ -1,0 +1,22 @@
+# Output videos
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
+.openchrome/
+
+# IDE
+.idea/
+.vscode/
+*.swp
