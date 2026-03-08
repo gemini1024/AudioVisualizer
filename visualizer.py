@@ -6,6 +6,7 @@ Usage: python3 visualizer.py input.m4a -o output.mp4
 
 import argparse
 import colorsys
+import math
 import os
 import random
 import subprocess
@@ -106,7 +107,9 @@ def render_frame(frame_idx):
     usable_top = label_area_h
     usable_bottom = H - progress_margin - progress_bar_h - 20
     usable_h = usable_bottom - usable_top
-    center_y = usable_top + usable_h // 2
+    center_y = usable_top + int(usable_h * 0.70)  # 중심선 20% 아래로 이동 (50% → 70%)
+    up_max = int(usable_h * 0.585)   # 위쪽 최대 픽셀 (65% × 0.9)
+    down_max = int(usable_h * 0.315) # 아래쪽 최대 픽셀 (35% × 0.9)
 
     # i=0: single centered bar.  i>=1: paired bars, offset past the center bar + gap.
     half_bar = bar_w // 2
@@ -135,10 +138,11 @@ def render_frame(frame_idx):
         h_val = bars[i]
         if h_val < 0.005:
             continue
-        half_h = max(1, int(h_val * usable_h / 4))
+        up_h = max(1, int(h_val * up_max))
+        down_h = max(1, int(h_val * down_max))
         color = tuple(_bar_colors[i])
-        gy_top = (center_y - half_h) // glow_scale
-        gy_bot = (center_y + half_h) // glow_scale
+        gy_top = (center_y - up_h) // glow_scale
+        gy_bot = (center_y + down_h) // glow_scale
 
         if i == 0:
             cx0, cx1 = center_rect()
@@ -155,23 +159,58 @@ def render_frame(frame_idx):
     img = ImageChops.add(img, glow_img)
 
     # --- Draw sharp bars on top ---
+    WAVE_AMP   = 3      # 최대 수평 이동 픽셀
+    WAVE_FREQ  = 0.07   # 수직 방향 파장 (rad/px)
+    WAVE_SPEED = 0.12   # 시간 방향 속도 (rad/frame)
+    SLICE      = 2      # 반사 슬라이스 두께 (px)
+
+    # 반사 레이어 (블러 적용을 위해 별도 이미지)
+    refl_img = Image.new('RGB', (W, H), (0, 0, 0))
+    refl_draw = ImageDraw.Draw(refl_img)
+
     draw = ImageDraw.Draw(img)
     for i in range(_n_bars):
         h_val = bars[i]
         if h_val < 0.005:
             continue
-        half_h = max(1, int(h_val * usable_h / 4))
+        up_h = max(1, int(h_val * up_max))
+        down_h = max(1, int(h_val * down_max))
         color = tuple(_bar_colors[i])
-        y_top = center_y - half_h
-        y_bot = center_y + half_h
+        y_top = center_y - up_h
+        y_bot = center_y + down_h
 
+        # x 좌표 미리 계산
         if i == 0:
             cx0, cx1 = center_rect()
-            draw.rectangle([cx0, y_top, cx1, y_bot], fill=color)
         else:
             rx0, rx1, lx0, lx1 = bar_rects(i)
-            draw.rectangle([rx0, y_top, rx1, y_bot], fill=color)
-            draw.rectangle([lx0, y_top, lx1, y_bot], fill=color)
+
+        # 위쪽 막대 (기존 동일)
+        if i == 0:
+            draw.rectangle([cx0, y_top, cx1, center_y], fill=color)
+        else:
+            draw.rectangle([rx0, y_top, rx1, center_y], fill=color)
+            draw.rectangle([lx0, y_top, lx1, center_y], fill=color)
+
+        # 아래쪽 막대 — 물 반사 효과 (페이드아웃 + 물결 왜곡) → 반사 레이어에 그림
+        for y in range(center_y, y_bot, SLICE):
+            depth = (y - center_y) / max(1, down_h)
+            fade = (1.0 - depth) ** 1.5
+            blended = tuple(
+                int(bar_c * fade + bg_c * (1.0 - fade))
+                for bar_c, bg_c in zip(color, _bg_color)
+            )
+            y1 = min(y + SLICE - 1, y_bot)
+            wave_dx = int(WAVE_AMP * math.sin(y * WAVE_FREQ + frame_idx * WAVE_SPEED))
+            if i == 0:
+                refl_draw.rectangle([cx0 + wave_dx, y, cx1 + wave_dx, y1], fill=blended)
+            else:
+                refl_draw.rectangle([rx0 + wave_dx, y, rx1 + wave_dx, y1], fill=blended)
+                refl_draw.rectangle([lx0 - wave_dx, y, lx1 - wave_dx, y1], fill=blended)
+
+    # 반사 레이어 블러 후 합성 (검은 배경이므로 add로 자연스럽게 합성)
+    refl_img = refl_img.filter(ImageFilter.GaussianBlur(radius=2))
+    img = ImageChops.add(img, refl_img)
 
     # --- Center line ---
     line_color = tuple(max(0, c - 180) + 40 for c in _bg_color)
